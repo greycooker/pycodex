@@ -315,8 +315,9 @@ same top-right position in their respective headers; the board switch follows
 the fullscreen button in the board toolbar. Floating session controls stay below
 the headers and contain only the session-list button and status dots.
 
-In the two-pane layout, the session sidebar starts collapsed until the user pins
-it; the pinned or collapsed choice is kept in `localStorage`
+In the two-pane layout, the session sidebar starts pinned open. Only its toggle
+button collapses it; clicks inside the sidebar, Escape and leaving it with the
+mouse do not. The choice is kept in `localStorage`
 (`pycodex.workspace.sessionsPinned`) and restored on the next load. Phone
 layouts always start collapsed and do not change the stored choice.
 Hovering for 100 ms previews it; leaving schedules dismissal after 150 ms,

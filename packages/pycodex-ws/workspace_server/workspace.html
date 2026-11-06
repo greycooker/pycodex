@@ -2180,9 +2180,9 @@
 
     function storedSessionsPinned() {
       try {
-        return window.localStorage.getItem(sessionsPinnedKey) === "1";
+        return window.localStorage.getItem(sessionsPinnedKey) !== "0";
       } catch (error) {
-        return false;
+        return true;
       }
     }
 
@@ -3779,21 +3779,25 @@
       }
     });
     sessionSidebar.addEventListener("click", event => {
-      if (event.target.closest("#sessionsClose, .tab")) return;
+      if (event.target.closest("#sessionsClose")) return;
+      if (!sessionsOpen && event.target.closest(".tab")) return;
       if (!sessionsOpen) {
         event.preventDefault();
         event.stopPropagation();
         setSessionsOpen(true, true);
       } else if (!sessionsPinned) {
         setSessionsOpen(true);
-      } else if (!event.target.closest("button, input, .tab")) {
+      } else if (mobileSessionsMedia.matches && !event.target.closest("button, input, .tab")) {
         setSessionsOpen(false, true);
       } else return;
       rememberSessionsPinned();
     }, true);
     sessionsBackdrop.addEventListener("click", () => setSessionsOpen(false, true));
     mobileSessionsMedia.addEventListener("change", () => {
-      setSessionsOpen(false, sessionSidebar.contains(document.activeElement));
+      setSessionsOpen(
+        !mobileSessionsMedia.matches && storedSessionsPinned(),
+        sessionSidebar.contains(document.activeElement),
+      );
     });
     sessionSidebar.addEventListener("keydown", event => {
       if (event.key !== "Tab" || !mobileSessionsMedia.matches || !sessionsOpen) return;
@@ -3810,8 +3814,8 @@
       }
     });
     document.addEventListener("keydown", event => {
-      if (event.key === "Escape" && sessionsOpen && !event.defaultPrevented &&
-          !event.target.closest("dialog")) {
+      if (event.key === "Escape" && sessionsOpen && mobileSessionsMedia.matches &&
+          !event.defaultPrevented && !event.target.closest("dialog")) {
         event.preventDefault();
         setSessionsOpen(false, true);
         rememberSessionsPinned();
