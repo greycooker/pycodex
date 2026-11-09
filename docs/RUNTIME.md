@@ -740,6 +740,23 @@ credential isolation belongs in the [workspace tests](../tests/TESTS.md#按包�
 
 ## Workspace session API
 
+`GET api/skills` returns `{skills: [{name, description}]}` with
+`Cache-Control: no-store`, under both single-workspace and `/w/{id}/` routes.
+It uses the workspace's configured Codex home, scans on request in the route
+thread pool, and neither constructs a model session nor exposes local paths.
+The ordinary workspace authentication rules apply. The CLI supplies the parent
+of `--config`; programmatic managers may pass `codex_home`, otherwise it resolves
+from `CODEX_HOME` or `~/.codex`.
+
+The web composer opens a skill list for a whitespace-delimited `@` or `$`
+token, filters names by case-insensitive prefix, and inserts `$skill-name `
+using its normal undoable text replacement. Up/Down selects, Tab/Enter accepts
+without submitting, and Escape dismisses until the token changes. Shift+Enter
+still inserts a newline; IME composition does not handle completion keys.
+The catalog is loaded lazily and cached for 15 seconds; later edits refresh it.
+The selection is checked again after asynchronous loads and before accepting.
+Email addresses, `${...}`, `$(...)`, and a cursor inside a name do not trigger it.
+
 `GET api/sessions` returns the session list (including each tab's `profile`),
 the available profile names in `profiles`, and `default_profile`, with
 `Cache-Control: no-store`. Each catalog request and new-session creation reloads
@@ -1339,7 +1356,11 @@ or the build toolchain.
 Runtime events are frozen dataclasses defined together in `pycodex/events.py`,
 separate from the conversation and model data in `pycodex/protocol.py`.
 Session commands belong in `runtime.py`; terminal startup, I/O and the input
-loop belong in `cli.py`. Presentation should describe user-visible phases such
+loop belong in `cli.py`. Interactive terminal input uses a
+`ThreadedCompleter` over the same core skill catalog as the web API and model
+context. `@`/`$` opens prefix suggestions with native prompt_toolkit navigation.
+Enter accepts an active candidate before submitting; Escape cancels completion.
+Noninteractive argv/stdin input is unchanged. Presentation should describe user-visible phases such
 as tools starting/completing and the model reviewing results; retain `iterations`
 in programmatic results instead of making it the main status label.
 `Event` is the common base; each concrete class declares its fields and a

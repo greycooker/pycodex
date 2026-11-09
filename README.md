@@ -75,6 +75,11 @@ pycodex --json "Summarize this repository."
 ```
 
 The first command starts an interactive session; the others run a single task.
+In the interactive CLI and workspace web input, type `@` or `$` at the start
+of a token to choose a skill. A name prefix filters the list; use Up/Down to
+choose, Tab or Enter to insert `$skill-name `, and Escape to dismiss.
+Press Enter again to submit. Skills are discovered from the configured Codex
+home's `skills/` directory, including `.system/`.
 The agent can edit files and run commands with your user account's permissions.
 
 | Command | Purpose |

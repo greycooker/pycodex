@@ -1,8 +1,13 @@
+import {SkillPicker} from "./skill_picker.mjs";
+
 /** A plain-text editor whose context tokens occupy one cursor position each. */
 export class Composer {
-  constructor(element, changed, submit, editContext, error, recallInput = null) {
+  constructor(element, changed, submit, editContext, error, recallInput = null, loadSkills = null) {
     this.element = element;
-    this.changed = changed;
+    this.changed = () => {
+      changed();
+      this.skillPicker?.update();
+    };
     this.submit = submit;
     this.editContext = editContext;
     this.error = error;
@@ -13,11 +18,15 @@ export class Composer {
     this.undo = [];
     this.redo = [];
     this.previous = this.read();
+    this.skillPicker = loadSkills ? new SkillPicker(this, loadSkills) : null;
     element.addEventListener("input", event => {
       if (!event.isComposing) this.record();
       this.changed();
     });
-    element.addEventListener("compositionstart", () => { this.composing = true; });
+    element.addEventListener("compositionstart", () => {
+      this.composing = true;
+      this.skillPicker?.hide();
+    });
     element.addEventListener("compositionend", () => {
       this.composing = false;
       this.record();
@@ -132,6 +141,7 @@ export class Composer {
     this.render(value);
     if (document.activeElement === this.element) this.focus();
     this.previous = this.read();
+    this.skillPicker?.update();
   }
 
   render(value) {
@@ -258,6 +268,7 @@ export class Composer {
 
   keydown(event) {
     if (event.isComposing || this.composing || event.keyCode === 229) return;
+    if (this.skillPicker?.keydown(event)) return;
     const modifier = event.ctrlKey || event.metaKey;
     if (this.recallInput && ["ArrowUp", "ArrowDown"].includes(event.key) &&
         !modifier && !event.altKey && !event.shiftKey) {

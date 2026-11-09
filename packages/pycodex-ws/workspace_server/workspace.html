@@ -1793,7 +1793,12 @@
       promptHint.hidden = !prompt.classList.contains("show-hint") || draft.parts.length > 0;
       resizePrompt();
     }, () => form.requestSubmit(), editContextBlock, showToast,
-    (back, current) => stateForSession(activeSessionId).promptHistory.recall(back, current));
+    (back, current) => stateForSession(activeSessionId).promptHistory.recall(back, current),
+    async () => {
+      const response = await fetch(relativeUrl("api/skills"));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.json()).skills;
+    });
     prompt.addEventListener("input", () => stateForSession(activeSessionId).promptHistory.reset());
     composer.set({parts: []});
     const markdownRenderer = window.markdownit

@@ -553,6 +553,17 @@ env -u VIRTUAL_ENV uv run --dev python -m tests.compare_context_requests \
 - 本地 compat 下游在响应头到达前断连时，返回 `response.failed`；模型客户端用相同请求重试并完成回复，不让网络异常逃出 ASGI。
 - 下游失败的正常错误包含阶段、耗时、timeout 和接收进度；验证响应头前断连、首个 chunk 前失败、读流中断及 HTTP 错误。
 
+### Skill 输入补全
+
+- `tests/test_skill_completion.py`：共享 catalog 与模型 context 一致、同名优先级、
+  文件新增可见、标记边界、前缀和光标中间处理；用真实 prompt_toolkit
+  pipe input 验证 `@` / `$` 补全时 Enter 不提交、再次 Enter 才提交。
+- `packages/pycodex-ws/tests/test_workspace_skills.py`：单 / 多 workspace 的
+  API 认证、配置目录隔离、实时目录变化与不构造模型会话。
+- 手动运行 Node 检查：`node packages/pycodex-ws/tests/workspace_skill_picker.mjs`，
+  覆盖异步返回时的当前草稿、上下键、Tab/Enter、Esc、IME、失焦与 chip 偏移。
+  继续运行 `workspace_prompt_history.mjs` 检查上下键历史兼容。
+
 ### `tests/test_cli.py`
 
 - 覆盖参数和 stdin/TTY 选择、单次调用和 JSON 输出、命令不进模型、失败退出码。

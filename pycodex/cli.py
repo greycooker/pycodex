@@ -3,6 +3,7 @@ import atexit
 import asyncio
 import inspect
 import os
+import re
 import shlex
 import signal
 import sys
@@ -14,8 +15,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion, ThreadedCompleter
 from prompt_toolkit.enums import DEFAULT_BUFFER
-from prompt_toolkit.filters import has_focus
+from prompt_toolkit.filters import has_completions, has_focus
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -25,6 +27,7 @@ from .events import DEFAULT_MAIN_PROMPT, EventDisplay
 from .model import ModelControl
 from .multi_agents import AgentsManager
 from .portable import bootstrap_called_home, upload_codex_home
+from .skill_completion import skill_catalog, skill_prefix
 from .utils import get_debug_dir
 from .utils.event_helpers import format_error, render_result
 
@@ -200,6 +203,10 @@ def _cli_sigint_handler(runtime):
 async def run_interactive_session(runtime, json_mode, config_path=None, view=None):
     if view is None:
         view = CliSessionView()
+        view.prompter._prompt_session.completer = ThreadedCompleter(
+            SkillCompleter(runtime.agent.context_manager.config.codex_home)
+        )
+        view.prompter._prompt_session.complete_while_typing = True
     await runtime.start(config_path)
     frontend_id = runtime.attach(view.handle_event)
 
@@ -238,6 +245,27 @@ async def run_interactive_session(runtime, json_mode, config_path=None, view=Non
                 runtime.detach(frontend_id)
                 view.close()
     return 0
+
+
+class SkillCompleter(Completer):
+    def __init__(self, codex_home):
+        self.codex_home = codex_home
+
+    def get_completions(self, document, complete_event):
+        prefix = skill_prefix(document.text_before_cursor)
+        if prefix is None:
+            return
+        # Leave the remainder of a token untouched rather than duplicating it.
+        if document.text_after_cursor and re.match(r"[A-Za-z0-9_-]", document.text_after_cursor):
+            return
+        for skill in skill_catalog(self.codex_home):
+            if skill["name"].lower().startswith(prefix[1:].lower()):
+                yield Completion(
+                    "$" + skill["name"] + " ",
+                    start_position=-len(prefix),
+                    display="$" + skill["name"],
+                    display_meta=skill["description"],
+                )
 
 
 class Prompter:
@@ -297,6 +325,18 @@ def prompt_session_kwargs() -> "typing.Dict[str, object]":
     @key_bindings.add("<sigint>")
     def exit_prompt(event):
         event.app.exit(exception=EOFError, style="class:aborting")
+
+    @key_bindings.add("tab", filter=has_focus(DEFAULT_BUFFER) & has_completions)
+    @key_bindings.add("enter", filter=has_focus(DEFAULT_BUFFER) & has_completions)
+    def accept_skill(event):
+        buffer = event.current_buffer
+        state = buffer.complete_state
+        completion = state.current_completion or state.completions[0]
+        buffer.apply_completion(completion)
+
+    @key_bindings.add("escape", filter=has_focus(DEFAULT_BUFFER) & has_completions)
+    def dismiss_skills(event):
+        event.current_buffer.cancel_completion()
 
     kwargs = {
         "erase_when_done": True,
