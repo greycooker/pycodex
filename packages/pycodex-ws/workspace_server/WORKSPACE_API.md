@@ -379,6 +379,28 @@ the transition from unwritten to recorded history can invalidate a cursor;
 HTTP 409 directs the client to restart pagination. Sources are append-only;
 external rollout edits are not a supported pagination workflow.
 
+## Server file uploads
+
+`GET api/uploads` returns `{max_file_bytes: 268435456}` (256 MiB, displayed
+as 256 MB). `POST api/sessions/{id}/uploads` accepts a raw
+`application/octet-stream` body with `X-Upload-Filename` containing a
+percent-encoded filename. The session must exist; ordinary workspace
+authentication and mount prefixes apply. No multipart parser is required.
+
+The server streams the file to a unique directory beside the workspace state
+(`{state-stem}.uploads/file-*/{filename}`); unpersisted workspaces use
+`{codex_home}/uploads`. Existing files are never overwritten. Filenames cannot
+contain path separators, control characters or more than 240 UTF-8 bytes.
+Content-Length and streamed bytes are checked; oversized files return 413.
+Interrupted/failed requests remove partial files. A successful 201 response
+contains `{name, path, bytes}`, with an absolute server path. Uploading does not
+submit a model message or alter conversation history.
+
+The optional server-upload composer adds that metadata as an ordinary context
+token. File bytes are never embedded in the prompt. Removing the token removes
+the attachment from the draft but leaves the stored file available to existing
+messages; uploads are retained across server restarts and session closure.
+
 ## WebSocket state and replay
 
 Connect to `ws/session?session_id=...`, optionally with `cursor=...` and

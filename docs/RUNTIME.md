@@ -746,6 +746,11 @@ credential isolation belongs in the [workspace tests](../tests/TESTS.md#按包�
 
 ## Workspace session API
 
+The authenticated server upload API streams files of up to 256 MiB into
+workspace storage without putting file bytes in model history. The optional
+composer sends path metadata and blocks sending during uploads.
+See [Server file uploads](../packages/pycodex-ws/workspace_server/WORKSPACE_API.md#server-file-uploads).
+
 The built-in chat keeps its recent 80-turn snapshot and fetches older messages
 through `history?format=display`, retaining stable message IDs, compaction
 markers and scroll anchors across live updates and session switches.

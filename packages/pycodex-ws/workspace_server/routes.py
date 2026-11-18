@@ -32,6 +32,7 @@ from .one_line_agent import one_line_agent_routes
 from .customization import frontend_asset_response, frontend_directory, load_workspace_template
 from .runtime_info import runtime_info_prompt
 from .session_api import session_api_routes
+from .uploads import upload_routes
 from .workspace_views import WorkspaceViewOpener
 from .workspaces import WorkspaceSessionManager, session_snapshot
 
@@ -157,7 +158,7 @@ def workspace_routes(resolve_workspace, sharing, prefix="", leading_routes=()):
 
     return session_api_routes(
         lambda request: workspace(request).manager, _json_object_body, prefix,
-    ) + one_line_agent_routes(
+    ) + upload_routes(workspace, prefix) + one_line_agent_routes(
         workspace, prefix,
     ) + list(leading_routes) + [
         route("/", index, ["GET"]),

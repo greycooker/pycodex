@@ -6,6 +6,29 @@ tags: [attachments, composer, files]
 
 # File attachments
 
+## Server upload mode (256 MB)
+
+The local server-upload variant uses [server_uploads.mjs](source/server_uploads.mjs)
+and [server_uploads.css](source/server_uploads.css). It supports choosing, dropping
+and pasting files, upload progress, cancellation, retries and a send guard.
+Each file can be 256 MiB (shown as 256 MB). Files are streamed to server storage;
+the next chat message carries only the filename, absolute path and size, allowing
+the Agent to read files on demand, including images with its file tools.
+It does not embed file contents/base64 or use the original client encoding limits.
+
+Copy these two files into the configured frontend directory, import
+`mountServerUploads` into its `custom.js` and call it from `mount(host)`.
+Append the CSS to `custom.css`. Use this mount instead of `mountUploads` so that
+two handlers do not process the same dropped file. Updating the backend to include
+the [upload API](../../WORKSPACE_API.md#server-file-uploads) is required.
+Refreshing enables the UI once the backend is updated. Other customization
+initialization and its teardown must be retained.
+
+Uploads remain on disk when removed from a draft, when the page reloads, or when
+a session is closed. Cancelling removes unfinished server files. The uploader
+queues at most 32 visible files, serially, and never automatically sends a message.
+The original browser-local implementation and its limits are described below.
+
 ## Behavior
 
 Select several files, paste a file, or drop files onto the composer. Each file

@@ -112,6 +112,18 @@ turn after observing running/waiting. The syntax probe avoids the old pytest
 
 ## 自动化测试
 
+`test_workspace_uploads.py` checks authenticated upload routes, name/size
+validation, duplicate filenames, interruption cleanup and an actual 256 MiB
+stream with bounded chunks. The manual browser test uses the same Playwright
+environment as the other scripts:
+
+```bash
+NODE_PATH=/tmp/pycodex-browser-check/node_modules node packages/pycodex-ws/tests/workspace_server_uploads.cjs
+```
+
+It covers selection/drop, upload completion preserving the latest draft, send
+guards, retries, oversize rejection and session-switch cancellation.
+
 One-line Agent 的 API、profile、token、多 session、关闭、旧会话热重载、临时页签与客户端循环
 回归可单独运行：
 `env -u VIRTUAL_ENV uv run --dev pytest packages/pycodex-ws/tests/test_one_line_agent.py`。

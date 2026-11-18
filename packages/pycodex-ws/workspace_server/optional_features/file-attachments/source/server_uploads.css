@@ -1,0 +1,7 @@
+.server-uploads { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.server-uploads > div { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.server-uploads button { font: inherit; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel-raised); padding: 4px 8px; cursor: pointer; }
+.server-uploads ul { list-style: none; margin: 8px 0 0; padding: 0; max-height: 150px; overflow: auto; }
+.server-uploads li { display: flex; align-items: center; gap: 8px; padding: 5px 0; flex-wrap: wrap; }
+.server-upload-name { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--ink); }

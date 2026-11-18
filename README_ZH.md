@@ -79,6 +79,7 @@ pycodex --json "概括这个仓库。"
 不带问题时进入交互会话，其他命令执行单次任务。
 网页聊天区滚到顶部会分页加载更早的消息，也可点击 **Load earlier messages**
 手动加载；请求失败时按钮可重试。
+可选的服务端文件上传功能支持单文件最大 256 MB；消息附服务器路径，供 Agent 按需读取。
 网页 skill 补全是 [optional feature](packages/pycodex-ws/workspace_server/optional_features/skill-completion/README.md)：
 通过 Customize 应用 `skill-completion` 后启用 @/$ 名称前缀补全。
 
