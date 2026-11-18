@@ -15,6 +15,7 @@ const html = source.replace(/__([A-Z_]+)__/g, (_, name) => ({
     window.fixture = {
       switchSession, createSession, closeSession, pollSession, restoreSessionScroll,
       renderSnapshot, updateSessions, sessionState, composer, renderMermaidInto, setSessionsOpen,
+      loadEarlierHistory,
       active: () => activeSessionId,
       stop: () => {clearInterval(pollTimer); clearInterval(boardPollTimer); stopContentViews();},
     };
@@ -43,6 +44,9 @@ function turn(id, text) {
     snapshots.get("a").turns[79].model_errors = ["Reconnecting... 1/5\nExample diagnostic"];
     const requests = [];
     const blocked = new Map();
+    let historyStatus = 200;
+    const historical = Array.from({length: 213}, (_, i) => turn("history-" + i, "Earlier answer\n".repeat(8)));
+    historical[30] = {...historical[30], kind: "compaction"};
     const list = () => tabs.map(id => ({id, title: id, cwd: "/" + id, running: false}));
     function block(key) {
       let release;
@@ -84,6 +88,17 @@ function turn(id, text) {
       }
       if (url.pathname === "/api/views") return route.fulfill({json: {views: []}});
       if (url.pathname === "/api/board") return route.fulfill({json: {exists: false}});
+      if (url.pathname.endsWith("/history")) {
+        requests.push("history");
+        if (blocked.has("history")) await blocked.get("history");
+        if (historyStatus !== 200) return route.fulfill({status: historyStatus, json: {}});
+        const end = Number(url.searchParams.get("before").split(":").pop());
+        const start = Math.max(0, end - 80);
+        return route.fulfill({json: {
+          history_id: "history-test", turns: historical.slice(start, end),
+          next_cursor: start ? `history-test:${start}` : null,
+        }});
+      }
       if (url.pathname === "/api/session") {
         const id = url.searchParams.get("session_id") || tabs[0];
         requests.push(id);
@@ -288,8 +303,93 @@ function turn(id, text) {
       assert.equal(await page.evaluate(() =>
         document.querySelector(".entry.response") === temporaryReply), true);
     }
+    // Scroll pagination retains the visible message, IDs, and expanded nodes
+    // while live snapshots roll their 80-row window forwards.
+    await page.setViewportSize({width: 1100, height: 850});
+    await page.evaluate(turns => {
+      window.historySnapshot = {
+        history_id: "history-test", history_cursor: "history-test:133",
+        turns, queued_inputs: [], spinner: "",
+      };
+      fixture.renderSnapshot(historySnapshot);
+    }, historical.slice(133));
+    const releaseHistory = block("history");
+    await page.evaluate(() => {
+      const log = document.getElementById("log");
+      log.scrollTop = 0;
+      window.historyAnchor = document.querySelector('[data-entry-key$="message:input-history-133"]');
+      window.historyAnchorTop = historyAnchor.getBoundingClientRect().top;
+    });
+    await page.waitForFunction(() => fixture.sessionState.get(fixture.active()).historyLoading);
+    while (!requests.includes("history")) await page.waitForTimeout(10);
+    assert.equal(requests.filter(id => id === "history").length, 1);
+    await page.evaluate(turns => {
+      historySnapshot.turns = turns;
+      fixture.renderSnapshot(historySnapshot);
+    }, historical.slice(134).concat(turn("new-live", "New live answer")));
+    releaseHistory();
+    await page.waitForFunction(() => !fixture.sessionState.get(fixture.active()).historyLoading);
+    const anchorShift = await page.evaluate(() =>
+      historyAnchor.getBoundingClientRect().top - historyAnchorTop);
+    assert.ok(Math.abs(anchorShift) < 2, `History anchor shifted by ${anchorShift}px`);
+    assert.equal(await page.evaluate(() => document.contains(historyAnchor)), true);
+    assert.equal(await page.locator('.entry.response').last().textContent(), "New live answer");
+    await page.evaluate(() => fixture.loadEarlierHistory());
+    assert.equal(await page.locator(".history-loader").count(), 0);
+    assert.equal(await page.locator(".entry.compaction").count(), 1);
+    assert.equal(await page.evaluate(() => {
+      const turns = fixture.sessionState.get(fixture.active()).displayTurns;
+      return turns.length === 214 && new Set(turns.map(turn => turn.turn_id)).size === 214;
+    }), true);
+    // Failure stays retryable; a response from the previous session is ignored.
+    await page.evaluate(turns => {
+      fixture.renderSnapshot({
+        history_id: "retry-test", history_cursor: "history-test:133",
+        turns, queued_inputs: [], spinner: "",
+      });
+    }, historical.slice(133));
+    historyStatus = 503;
+    await page.evaluate(() => fixture.loadEarlierHistory());
+    assert.match(await page.locator(".history-loader button").textContent(), /Retry.*503/);
+    historyStatus = 200;
+    const releaseLateHistory = block("history");
+    tabs.push("b");
+    await page.evaluate(() => {fixture.loadEarlierHistory();});
+    await page.waitForFunction(() => fixture.sessionState.get(fixture.active()).historyLoading);
+    await page.evaluate(() => fixture.switchSession("b"));
+    releaseLateHistory();
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('[data-entry-key*="history-"]').count(), 0);
+    await page.evaluate(turns => {
+      fixture.renderSnapshot({
+        history_id: "gap-test", history_cursor: "gap-test:133",
+        turns, queued_inputs: [], spinner: "",
+      });
+      const next = turns.map(turn => ({...turn, turn_id: "new-" + turn.turn_id}));
+      fixture.renderSnapshot({
+        history_id: "gap-test", history_cursor: "gap-test:300",
+        turns: next, queued_inputs: [], spinner: "",
+      });
+      const state = fixture.sessionState.get(fixture.active());
+      if (state.displayTurns.length !== 80 || state.historyCursor !== "gap-test:300") {
+        throw new Error("Disconnected snapshot windows skipped a history gap");
+      }
+      const pending = {
+        turn_id: "", submission_id: "pending", messages: [], model_errors: [],
+      };
+      fixture.renderSnapshot({
+        history_id: "gap-test", turns: next.concat(pending), queued_inputs: [], spinner: "",
+      });
+      fixture.renderSnapshot({
+        history_id: "gap-test", turns: next.concat({...pending, turn_id: "started"}),
+        queued_inputs: [], spinner: "",
+      });
+      if (state.displayTurns.length !== 81 || state.displayTurns.at(-1).turn_id !== "started") {
+        throw new Error("Starting a queued turn duplicated its pending entry");
+      }
+    }, historical.slice(133));
     assert.deepEqual(errors, []);
-    console.log("Session cache, message metadata, temporary reply animation and mobile layout passed.");
+    console.log("Session cache, history pagination, scroll anchors, message metadata and mobile layout passed.");
   } finally {
     await browser.close();
   }

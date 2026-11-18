@@ -84,6 +84,8 @@ pycodex --json "Summarize this repository."
 ```
 
 The first command starts an interactive session; the others run a single task.
+The workspace chat loads older messages when scrolled to the top, with a
+**Load earlier messages** button for manual loading or retry.
 Web skill completion is an [optional frontend feature](packages/pycodex-ws/workspace_server/optional_features/skill-completion/README.md).
 Apply `skill-completion` through Customize to enable @/$ prefix suggestions.
 

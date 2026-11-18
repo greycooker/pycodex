@@ -337,6 +337,24 @@ admission appear in the submission record.
 
 ## History pagination
 
+The built-in chat uses `GET api/sessions/{id}/history?format=display`.
+This returns `{source: "display", history_id, turns, next_cursor}` using the
+same turn/message IDs and display fields as the chat snapshot, including
+timestamps and compaction markers. The snapshot supplies `history_id` and
+`history_cursor` for fetching messages before its recent 80-turn window.
+Pass that cursor as `before`; subsequent pages use `next_cursor`. Pages
+contain at most `limit` turns (1–200). Appending and compaction markers preserve
+cursors; restoring/replacing a conversation invalidates them with HTTP 409.
+The browser retains loaded turns per session, merges live snapshots, and
+preserves the visible message when prepending history. Scrolling to the top
+loads a page; a button permits manual loading and retry after errors.
+Restoration reads only the recent display rows. The first older-page request
+reads and caches the remaining display history from the rollout off the session
+loop; subsequent requests use that cache. This keeps initial responses bounded,
+but the server cache grows to the full display transcript once history is requested.
+Omitting `format`, or using `format=raw`, retains the original resource format
+described below; raw and display cursors are separate.
+
 `limit` is between 1 and 200. The initial page contains the newest records;
 each page is chronological. Pass `next_cursor` as `before` for older records;
 stop at `next_cursor: null`. Cursors are opaque.

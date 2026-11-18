@@ -746,6 +746,12 @@ credential isolation belongs in the [workspace tests](../tests/TESTS.md#按包�
 
 ## Workspace session API
 
+The built-in chat keeps its recent 80-turn snapshot and fetches older messages
+through `history?format=display`, retaining stable message IDs, compaction
+markers and scroll anchors across live updates and session switches.
+See [History pagination](../packages/pycodex-ws/workspace_server/WORKSPACE_API.md#history-pagination)
+for cursors, restoration and display-cache behavior.
+
 `GET api/skills` returns skill names/descriptions through `list_skills`.
 The optional [Web adapter](../packages/pycodex-ws/workspace_server/optional_features/skill-completion/README.md)
 owns completion UI; the host exposes a generic undoable `replaceDraftText` edit.

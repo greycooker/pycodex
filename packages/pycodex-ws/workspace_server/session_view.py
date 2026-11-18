@@ -6,6 +6,8 @@ import threading
 import typing
 from dataclasses import asdict, fields, is_dataclass
 
+from starlette.exceptions import HTTPException
+
 from pycodex.events import (
     IDLE_SLEEPING_STATUS,
     AssistantDeltaEvent,
@@ -64,6 +66,8 @@ class WebSessionView:
         self._events: "typing.List[typing.Dict[str, object]]" = []
         self._stream_id = uuid7_string()
         self._sequence = 0
+        self._history_id = uuid7_string()
+        self._history_truncated = False
         self._runtime_state = None
         self._turns: "typing.List[typing.Dict[str, object]]" = []
         self._turns_by_submission_id: "typing.Dict[str, typing.Dict[str, object]]" = {}
@@ -139,6 +143,45 @@ class WebSessionView:
             }
         self.publish(event)
 
+    def _history_cursor(self, turn):
+        return "{0}:{1}".format(self._history_id, turn["turn_id"])
+
+    def display_history_page(self, before=None, limit=80):
+        # Restoration stays bounded. Read the older display rows only on demand;
+        # keep the existing live objects (and their submission IDs) authoritative.
+        with self._lock:
+            if before is not None and not before.startswith(self._history_id + ":"):
+                raise HTTPException(409, "display history changed; restart pagination")
+            if self._history_truncated:
+                history = load_display_history(self._recorded_rollout_path, limit=None)
+                first_id = self._turns[0]["turn_id"] if self._turns else None
+                boundary = next((i for i, row in enumerate(history)
+                                 if row["turn_id"] == first_id), None)
+                if boundary is None:
+                    raise HTTPException(409, "display history source changed")
+                prefix = []
+                for row in history[:boundary]:
+                    turn = self._ensure_turn(row["turn_id"], row["turn_id"])
+                    turn.update(row, status="completed", queue="history", sender="resume")
+                    prefix.append(turn)
+                if prefix:
+                    self._turns = prefix + self._turns[:-len(prefix)]
+                self._history_truncated = False
+            end = len(self._turns)
+            if before is not None:
+                turn_id = before[len(self._history_id) + 1:]
+                end = next((i for i, turn in enumerate(self._turns)
+                            if turn["turn_id"] == turn_id), None)
+                if end is None:
+                    raise HTTPException(409, "display history cursor no longer exists")
+            start = max(0, end - limit)
+            return {
+                "source": "display",
+                "history_id": self._history_id,
+                "turns": [_public_turn(turn) for turn in self._turns[start:end]],
+                "next_cursor": self._history_cursor(self._turns[start]) if start else None,
+            }
+
     def load_session_history(
         self,
         title: "typing.Union[str, None]",
@@ -146,6 +189,8 @@ class WebSessionView:
     ) -> None:
         with self._lock:
             self._set_title(title)
+            self._history_id = uuid7_string()
+            self._history_truncated = False
             self._turns = []
             self._turns_by_submission_id = {}
             self._turns_by_turn_id = {}
@@ -220,6 +265,12 @@ class WebSessionView:
                 "title": self._title,
                 **self._context_usage(),
                 "turns": [_public_turn(turn) for turn in self._turns[-80:]],
+                "history_id": self._history_id,
+                "history_cursor": self._history_cursor(self._turns[-80])
+                if len(self._turns) > 80 else (
+                    self._history_cursor(self._turns[0])
+                    if self._history_truncated and self._turns else None
+                ),
             }
 
     def summary(self) -> "typing.Dict[str, object]":
@@ -257,6 +308,9 @@ class WebSessionView:
                 if state["recorded_rollout_path"] is not None:
                     history = load_display_history(state["recorded_rollout_path"])
                 self.load_session_history(state["title"], history)
+                self._history_truncated = (
+                    state["recorded_rollout_path"] is not None and len(history) == 80
+                )
                 if active is not None:
                     turn = self._ensure_turn(active["submission_id"], active["turn_id"])
                     self._append_messages(active["messages"], active["turn_id"], active["submission_id"])

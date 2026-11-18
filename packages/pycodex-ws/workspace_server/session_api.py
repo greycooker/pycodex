@@ -64,6 +64,8 @@ def session_api_routes(resolve_manager, read_json, prefix=""):
             resource = "submission"
             options["submission_id"] = request.path_params["submission_id"]
         if resource == "history":
+            if options.get("format", "raw") not in {"raw", "display"}:
+                raise HTTPException(422, "format must be raw or display")
             try:
                 limit = int(options.get("limit", "100"))
             except ValueError as error:

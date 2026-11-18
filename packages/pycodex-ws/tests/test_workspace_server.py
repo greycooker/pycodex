@@ -325,6 +325,7 @@ const log = {
   set textContent(value) {
     this.children = value ? [{
       textContent: value, parentElement: this,
+      classList: {contains: () => false},
       getBoundingClientRect: () => ({top: 0, bottom: 1000}),
     }] : [];
   },

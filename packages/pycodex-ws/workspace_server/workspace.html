@@ -808,6 +808,7 @@
     .workspace-back:hover { color: var(--ink); background: var(--panel-hover); }
     .log {
       min-height: 0;
+      overflow-anchor: none;
       overflow-y: auto;
       overflow-x: hidden;
       padding: 16px 20px 20px;
@@ -2531,6 +2532,12 @@
         sessionState.set(key, {
           lastRenderedSignature: "",
           entries: [],
+          displayTurns: [],
+          historyId: null,
+          historyCursor: null,
+          historyLoading: false,
+          historyError: "",
+          latestSnapshot: null,
           scrollTop: null,
           draft: {parts: []},
           promptHistory: new PromptHistory(),
@@ -3064,34 +3071,108 @@
       }
     }
 
-    function renderSnapshot(snapshot) {
+    async function loadEarlierHistory() {
+      const sessionId = activeSessionId;
+      const state = stateForSession(sessionId);
+      if (!state.historyCursor || state.historyLoading) return;
+      const historyId = state.historyId;
+      const cursor = state.historyCursor;
+      state.historyLoading = true;
+      state.historyError = "";
+      state.lastRenderedSignature = "";
+      renderSnapshot(state.latestSnapshot, true);
+      try {
+        const response = await fetch(relativeUrl(
+          `api/sessions/${encodeURIComponent(sessionId)}/history?format=display&limit=80&before=${encodeURIComponent(cursor)}`
+        ));
+        if (sessionId !== activeSessionId || state.historyId !== historyId) return;
+        if (response.status === 409) {
+          state.historyId = null;
+          state.displayTurns = [];
+          state.latestSnapshot = null;
+          await pollSession();
+          return;
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const page = await response.json();
+        if (sessionId !== activeSessionId || state.historyId !== historyId ||
+            page.history_id !== historyId) return;
+        const existing = new Set(state.displayTurns.map(turn => turn.turn_id));
+        state.displayTurns = page.turns.filter(turn => !existing.has(turn.turn_id))
+          .concat(state.displayTurns);
+        state.historyCursor = page.next_cursor;
+      } catch (error) {
+        if (state.historyId === historyId) state.historyError = error.message;
+      } finally {
+        state.historyLoading = false;
+        if (sessionId === activeSessionId && state.latestSnapshot) {
+          state.lastRenderedSignature = "";
+          renderSnapshot(state.latestSnapshot, true);
+        }
+      }
+    }
+
+    function renderSnapshot(snapshot, preserveAnchor = false) {
       if (!snapshot) return;
       updatePromptPlaceholder(snapshot);
       updateSessionDirectory(snapshot);
       const state = stateForSession(activeSessionId);
+      state.latestSnapshot = snapshot;
+      if (state.historyId !== (snapshot.history_id || null)) {
+        state.displayTurns = [];
+        state.historyId = snapshot.history_id || null;
+        state.historyCursor = snapshot.history_cursor || null;
+        state.historyError = "";
+      } else if (!state.displayTurns.length) {
+        state.historyCursor = snapshot.history_cursor || null;
+      }
+      const incoming = Array.isArray(snapshot.turns) ? snapshot.turns : [];
+      if (snapshot.history_id) {
+        // A background session can advance by more than a snapshot window.
+        // Restart from its new boundary so older pagination cannot skip the gap.
+        if (state.displayTurns.length && incoming.length &&
+            !incoming.some(next => state.displayTurns.some(previous =>
+              (next.turn_id && next.turn_id === previous.turn_id) ||
+              (next.submission_id && next.submission_id === previous.submission_id)))) {
+          state.displayTurns = [];
+          state.historyCursor = snapshot.history_cursor || null;
+        }
+        const updated = new Map(incoming.filter(turn => turn.turn_id).map(turn => [turn.turn_id, turn]));
+        const submissions = new Map(incoming.filter(turn => turn.submission_id)
+          .map(turn => [turn.submission_id, turn]));
+        state.displayTurns = state.displayTurns
+          .filter(turn => turn.turn_id || submissions.has(turn.submission_id))
+          .map(turn => updated.get(turn.turn_id) || submissions.get(turn.submission_id) || turn);
+        const key = turn => turn.turn_id || turn.submission_id;
+        const retained = new Set(state.displayTurns.map(key));
+        state.displayTurns.push(...incoming.filter(turn => !retained.has(key(turn))));
+      } else {
+        state.displayTurns = incoming;
+      }
       state.inputRequest = snapshot.input_request || null;
       state.queuedInputs = snapshot.queued_inputs;
       state.promptHistory.update(snapshot.turns);
       renderQueueHint(snapshot.queued_inputs);
       requestAnimationFrame(markVisibleFinalRead);
-      const signature = messageSignature(snapshot);
+      const signature = messageSignature({...snapshot, turns: state.displayTurns}) +
+        JSON.stringify([state.historyCursor, state.historyLoading, state.historyError]);
       if (signature === state.lastRenderedSignature) {
         setSpinner(snapshot.spinner || "");
         updateContextMeter(snapshot);
         return;
       }
       state.lastRenderedSignature = signature;
-      const shouldStick = state.scrollTop === null || isNearBottom();
+      const shouldStick = !preserveAnchor && (state.scrollTop === null || isNearBottom());
       const previousScrollTop = log.scrollTop;
       const viewportTop = log.getBoundingClientRect().top;
       const anchor = !shouldStick && restoreScrollTop === null
-        ? Array.from(log.children).find(entry => entry.getBoundingClientRect().bottom > viewportTop)
+        ? Array.from(log.children).find(entry => !entry.classList.contains("history-loader") &&
+            entry.getBoundingClientRect().bottom > viewportTop)
         : null;
       const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
       suppressScrollSave = true;
       try {
-        const turns = Array.isArray(snapshot.turns) ? snapshot.turns : [];
-        renderConversation(turns, state.inputRequest);
+        renderConversation(state.displayTurns, state.inputRequest);
         setSpinner(snapshot.spinner || "");
         updateContextMeter(snapshot);
         // Hidden mobile panes have no layout; restore their scroll when shown.
@@ -3138,6 +3219,21 @@
         entry.renderedSource = text;
         entries.push(entry);
         return entry.querySelector(":scope > .text");
+      }
+      const state = stateForSession(activeSessionId);
+      if (state.historyCursor) {
+        const body = renderEntry("history-loader", "", "control history-loader");
+        let button = body.querySelector("button");
+        if (!button) {
+          button = element("button");
+          button.type = "button";
+          button.addEventListener("click", loadEarlierHistory);
+          body.append(button);
+        }
+        button.disabled = state.historyLoading;
+        button.textContent = state.historyLoading ? "Loading earlier messages…" :
+          state.historyError ? `Retry loading earlier messages (${state.historyError})` :
+          "Load earlier messages";
       }
       turns.forEach(turn => renderTurn(turn, renderEntry));
       if (!turns.length && !inputRequest) {
@@ -3696,6 +3792,7 @@
       if (!state.lastRenderedSignature) return;
       state.scrollTop = log.scrollTop;
       requestAnimationFrame(markVisibleFinalRead);
+      if (log.scrollTop < 80 && !state.historyError) loadEarlierHistory();
     });
 
     splitter.addEventListener("pointerdown", startResize);

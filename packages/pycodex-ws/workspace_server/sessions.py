@@ -218,6 +218,11 @@ class WorkspaceInteractiveSession:
                 "models": await runtime.list_models(),
             }
         if resource == "history":
+            if options.get("format") == "display":
+                view = await self.event_view(agent_id)
+                return await run_in_threadpool(
+                    view.display_history_page, options.get("before"), options["limit"],
+                )
             agent = runtime.agent
             return await run_in_threadpool(
                 history_page, agent.session_id, agent.history_revision,

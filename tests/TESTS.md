@@ -146,6 +146,11 @@ NODE_PATH=/tmp/pycodex-browser-check/node_modules node packages/pycodex-ws/tests
 
 会话缓存的完整页面浏览器回归使用同一 Playwright 环境，手动运行：
 
+`test_display_pagination.py` covers display pagination over 213 turns,
+compaction markers, restored rollout history, live appends and cursor invalidation.
+The browser script also covers scroll anchors during pagination and live updates,
+retryable failures and late responses after switching sessions.
+
 ```bash
 NODE_PATH=/tmp/pycodex-browser-check/node_modules node packages/pycodex-ws/tests/workspace_session_cache.cjs
 ```
