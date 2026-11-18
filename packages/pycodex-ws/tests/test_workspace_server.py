@@ -98,6 +98,13 @@ def make_entry(definition, persist_callback=None):
     )
 
 
+def saved_tab_metadata(store):
+    # Existing assertions cover conversation metadata; stable restart IDs are
+    # verified separately in test_workspace_persistent_ids.py.
+    return [{key: value for key, value in tab.items() if key != "id"}
+            for tab in store.load_tabs()]
+
+
 def wait_snapshot(client, predicate, path="/api/session"):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
@@ -1201,7 +1208,7 @@ def test_boardless_workspace_preserves_context_and_tools(
     assert [tool.name for tool in prompt.tools] == toolset
     assert load_workspace_definitions(config)[0].board_path is None
     store = WorkspaceStateStore(Path(saved_prefix + ".pycodex-ws.json"))
-    assert store.load_tabs() == [
+    assert saved_tab_metadata(store) == [
         {"title": "fix", "rollout_path": state["rollout_path"], "cwd": str(tmp_path / "repo"), "profile": None}
     ]
     restored_registry = WorkspaceRegistry(
@@ -1246,7 +1253,7 @@ def test_sessions_persist_titles_and_restore_history(
             browser,
             lambda item: item["turns"] and item["turns"][-1]["response"] == "done",
         )
-        assert store.load_tabs() == [
+        assert saved_tab_metadata(store) == [
             {"title": "saved prompt", "rollout_path": state["rollout_path"], "cwd": str(Path.cwd()), "profile": None}
         ]
         if explicit_title:
@@ -1261,7 +1268,7 @@ def test_sessions_persist_titles_and_restore_history(
         assert browser.delete("/api/sessions/" + first_id).status_code == 400
     assert board.read_text(encoding="utf-8") == "unchanged board"
     title = "saved" if explicit_title else "saved prompt"
-    assert store.load_tabs() == [
+    assert saved_tab_metadata(store) == [
         {"title": title, "rollout_path": state["rollout_path"], "cwd": str(Path.cwd()), "profile": None}
     ]
     with TestClient(create_app(session_factory, board.with_suffix(""))) as browser:
@@ -1330,7 +1337,7 @@ def test_workspace_rejects_fork_and_restores_original_session(tmp_path, threaded
     expected = [("saved prompt", "done")]
     if continue_after_error:
         expected.append(("after error", "done"))
-    assert store.load_tabs() == [
+    assert saved_tab_metadata(store) == [
         {"title": "saved", "rollout_path": str(original_path), "cwd": str(Path.cwd()), "profile": None}
     ]
 
@@ -1346,7 +1353,7 @@ def test_workspace_rejects_fork_and_restores_original_session(tmp_path, threaded
         ]
 
     assert original_path.read_bytes().startswith(original_bytes)
-    assert store.load_tabs() == [
+    assert saved_tab_metadata(store) == [
         {"title": "saved", "rollout_path": str(restored_path), "cwd": str(Path.cwd()), "profile": None}
     ]
 
@@ -1365,13 +1372,13 @@ def test_empty_workspace_tabs_survive_restart(tmp_path, threaded):
         return make_session()
 
     with TestClient(create_app(session_factory, board.with_suffix(""))) as browser:
-        assert store.load_tabs() == [empty_tab]
+        assert saved_tab_metadata(store) == [empty_tab]
         first_id = browser.get("/api/sessions").json()["sessions"][0]["id"]
         second_id = browser.post("/api/sessions").json()["session_id"]
         browser.post("/api/sessions")
-        assert store.load_tabs() == [empty_tab] * 3
+        assert saved_tab_metadata(store) == [empty_tab] * 3
         assert browser.delete("/api/sessions/" + second_id).status_code == 200
-        assert store.load_tabs() == [empty_tab] * 2
+        assert saved_tab_metadata(store) == [empty_tab] * 2
         snapshot = browser.get(
             "/api/session", params={"session_id": first_id}
         ).json()["snapshot"]
@@ -1380,7 +1387,7 @@ def test_empty_workspace_tabs_survive_restart(tmp_path, threaded):
     with TestClient(create_app(session_factory, board.with_suffix(""))) as browser:
         tabs = browser.get("/api/sessions").json()["sessions"]
         assert len(tabs) == 2
-        assert store.load_tabs() == [empty_tab] * 2
+        assert saved_tab_metadata(store) == [empty_tab] * 2
         for tab in tabs:
             snapshot = browser.get(
                 "/api/session", params={"session_id": tab["id"]}
@@ -1398,7 +1405,7 @@ def test_titled_empty_workspace_tab_survives_restart(tmp_path):
         assert response.status_code == 200
         path = Path(response.json()["snapshot"]["rollout_path"])
         assert not path.exists()
-    assert store.load_tabs() == [{"title": "empty", "rollout_path": "", "cwd": str(Path.cwd()), "profile": None}]
+    assert saved_tab_metadata(store) == [{"title": "empty", "rollout_path": "", "cwd": str(Path.cwd()), "profile": None}]
 
     with TestClient(create_app(make_session, board.with_suffix(""))) as browser:
         state = browser.get("/api/session").json()["snapshot"]
@@ -1409,7 +1416,7 @@ def test_titled_empty_workspace_tab_survives_restart(tmp_path):
             browser,
             lambda item: item["turns"] and item["turns"][-1]["response"] == "done",
         )
-    assert store.load_tabs() == [
+    assert saved_tab_metadata(store) == [
         {"title": "empty", "rollout_path": state["rollout_path"], "cwd": str(Path.cwd()), "profile": None}
     ]
 
@@ -1468,8 +1475,8 @@ def test_session_directories_are_independent_and_restored(tmp_path, threaded):
         wait_snapshot(browser, lambda s: s["turns"] and s["turns"][-1]["response"] == "done",
                       "/api/session?session_id=" + second_id)
     assert [tab["cwd"] for tab in store.load_tabs()] == [str(target), str(tmp_path)]
-    assert store.load_tabs()[0]["rollout_path"] == ""
-    assert store.load_tabs()[1]["rollout_path"]
+    assert saved_tab_metadata(store)[0]["rollout_path"] == ""
+    assert saved_tab_metadata(store)[1]["rollout_path"]
     with TestClient(create_app(factory, state_path, work_dir=tmp_path)) as browser:
         sessions = browser.get("/api/sessions").json()["sessions"]
         assert [tab["cwd"] for tab in sessions] == [str(target), str(tmp_path)]
@@ -1488,12 +1495,12 @@ def test_workspace_explicit_save_keeps_unchanged_state(tmp_path, command):
         state = wait_snapshot(
             browser, lambda s: s["turns"] and s["turns"][-1]["response"] == "done"
         )
-        assert store.load_tabs() == [
+        assert saved_tab_metadata(store) == [
             {"title": "saved prompt", "rollout_path": state["rollout_path"], "cwd": str(Path.cwd()), "profile": None}
         ]
         response = browser.post("/api/session/message", json={"prompt": command})
         assert response.status_code == 200
-    assert store.load_tabs() == [
+    assert saved_tab_metadata(store) == [
         {"title": "saved prompt", "rollout_path": state["rollout_path"], "cwd": str(Path.cwd()), "profile": None}
     ]
 
@@ -1522,7 +1529,7 @@ def test_workspace_keeps_recorded_target_after_compact_or_failure(tmp_path, next
         if next_input == "failed turn":
             wait_snapshot(browser, lambda s: s["turns"][-1]["status"] == "error")
     assert original_path.is_file()
-    assert store.load_tabs() == [{"title": "saved", "rollout_path": str(original_path), "cwd": str(Path.cwd()), "profile": None}]
+    assert saved_tab_metadata(store) == [{"title": "saved", "rollout_path": str(original_path), "cwd": str(Path.cwd()), "profile": None}]
     with TestClient(create_app(session_factory, board.with_suffix(""))) as browser:
         assert browser.get("/api/session").json()["snapshot"]["rollout_path"] == str(
             original_path
@@ -1559,7 +1566,7 @@ async def test_workspace_close_persists_session_after_stopping_turn(tmp_path):
         await closing
     with pytest.raises(SubmissionInterrupted):
         await second.future
-    assert WorkspaceStateStore(board.with_suffix(".pycodex-ws.json")).load_tabs() == [
+    assert saved_tab_metadata(WorkspaceStateStore(board.with_suffix(".pycodex-ws.json"))) == [
         {"title": "saved", "rollout_path": str(rollout_path), "cwd": str(Path.cwd()), "profile": None}
     ]
 
@@ -1590,7 +1597,7 @@ async def test_workspace_missing_saved_directory_fails_without_rewriting_state(t
         await manager.start()
     assert session.runtime.agent.is_shutdown
     assert not manager.list_sessions()
-    assert store.load_tabs() == tabs
+    assert saved_tab_metadata(store) == tabs
 
 
 @pytest.mark.asyncio
@@ -1632,7 +1639,7 @@ async def test_workspace_failed_restore_keeps_the_full_saved_tab_list(
     try:
         with pytest.raises(FileNotFoundError):
             await manager.start()
-        assert store.load_tabs() == tabs
+        assert saved_tab_metadata(store) == tabs
     finally:
         await manager.close()
 
@@ -1846,12 +1853,12 @@ def test_unread_survives_compact_but_clears_on_restart(tmp_path, threaded, read)
         state = wait_snapshot(browser, lambda s: s["turns"][-1]["kind"] == "compaction")
         assert state["last_final_id"] == final_id
         assert browser.get("/api/sessions").json()["sessions"][0]["unread"] is (not read)
-        assert store.load_tabs() == [
+        assert saved_tab_metadata(store) == [
             {"title": "question", "rollout_path": state["rollout_path"], "cwd": str(Path.cwd()), "profile": None}
         ]
     with TestClient(create_app(factory, state_path)) as browser:
         payload = browser.get("/api/session").json()
-        assert payload["session_id"] != session_id
+        assert payload["session_id"] == session_id
         assert payload["snapshot"]["last_final_id"] == ""
         assert all(not turn["final_id"] for turn in payload["snapshot"]["turns"])
         assert not payload["sessions"][0]["unread"]

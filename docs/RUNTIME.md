@@ -746,6 +746,10 @@ credential isolation belongs in the [workspace tests](../tests/TESTS.md#按包�
 
 ## Workspace session API
 
+Workspace tab IDs are persisted with the tab state and restored across server
+restarts, preserving browser selection and per-tab drafts. Legacy saved tabs
+without an `id` receive one when restored; subsequent state saves retain it.
+
 The authenticated server upload API streams files of up to 256 MiB into
 workspace storage without putting file bytes in model history. The optional
 composer sends path metadata and blocks sending during uploads.

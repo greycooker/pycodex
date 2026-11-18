@@ -121,6 +121,7 @@ class WorkspaceSessionManager:
                 rollout_path=tab["rollout_path"],
                 cwd=tab.get("cwd"),
                 profile=tab.get("profile", self.default_profile),
+                session_id=tab.get("id"),
             )
         for session_id in self._session_order:
             self._subscribe_session_state(session_id)
@@ -175,6 +176,7 @@ class WorkspaceSessionManager:
         cwd: "typing.Optional[str]" = None,
         profile: "typing.Optional[str]" = None,
         session=None,
+        session_id=None,
     ) -> str:
         if profile is not None and (
             not isinstance(profile, str) or profile not in self.profile_factories
@@ -184,7 +186,9 @@ class WorkspaceSessionManager:
             self._session_factory if profile is None else self.profile_factories[profile]
         )
         async with self._get_lock():
-            session_id = uuid7_string()
+            session_id = uuid7_string() if session_id is None else session_id
+            if not isinstance(session_id, str) or not session_id or session_id in self._sessions:
+                raise ValueError("invalid or duplicate persisted workspace session ID")
             if session is None:
                 session = factory()
             await session.start()
@@ -257,7 +261,7 @@ class WorkspaceSessionManager:
 
     def persist_workspace_state(self) -> None:
         self._state_store.save_tabs(
-            self._tab_states[session_id] for session_id in self._session_order
+            dict(self._tab_states[session_id], id=session_id) for session_id in self._session_order
             if not self._tab_states[session_id].get("temporary")
         )
         if self._persist_callback is not None:
