@@ -388,6 +388,27 @@ function turn(id, text) {
         throw new Error("Starting a queued turn duplicated its pending entry");
       }
     }, historical.slice(133));
+    // A still-running 0.6.1 backend serves prompt-only snapshots after an
+    // editable checkout updates its HTML. Messages must remain visible.
+    await page.evaluate(() => fixture.renderSnapshot({
+      queued_inputs: [], spinner: "", turns: [{
+        turn_id: "old-backend", submission_id: "old-submission",
+        prompt: "Old backend question", response: "Old backend answer",
+        prompt_at: "2026-01-01T09:00:00Z", response_at: "2026-01-01T09:02:00Z",
+        status: "completed", model_errors: [],
+      }],
+    }));
+    assert.equal(await page.locator(".entry.user > .text").textContent(), "Old backend question");
+    assert.match(await page.locator(".entry.response > .text").textContent(), /Old backend answer/);
+    assert.equal(await page.locator(".message-header time").count(), 1);
+    await page.evaluate(() => fixture.renderSnapshot({
+      queued_inputs: [], spinner: "", turns: [{
+        turn_id: "old-backend", submission_id: "old-submission",
+        prompt: "Old backend question", response: "Old backend updated answer",
+        status: "completed", model_errors: [],
+      }],
+    }));
+    assert.equal(await page.locator(".entry.response > .text").textContent(), "Old backend updated answer");
     assert.deepEqual(errors, []);
     console.log("Session cache, history pagination, scroll anchors, message metadata and mobile layout passed.");
   } finally {

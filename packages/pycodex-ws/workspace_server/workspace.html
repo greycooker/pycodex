@@ -3337,7 +3337,13 @@
         return;
       }
       const isControl = turn.kind === "control";
-      for (const message of turn.messages) {
+      // Editable installations can serve upgraded HTML before the running
+      // backend restarts. Older snapshots carry a prompt instead of messages.
+      const messages = Array.isArray(turn.messages) ? turn.messages : turn.prompt ? [{
+        message_id: `legacy-prompt:${turn.submission_id || turn.turn_id}`,
+        text: turn.prompt, name: "user", created_at: turn.prompt_at,
+      }] : [];
+      for (const message of messages) {
         const setup = message.text.startsWith("<frontend_customization>\n") &&
           message.text.endsWith("\n</frontend_customization>");
         const body = renderEntry(`message:${message.message_id}`, message.text, setup ? "setup" : isControl ? "control" : "user");
