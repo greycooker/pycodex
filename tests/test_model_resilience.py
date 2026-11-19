@@ -191,6 +191,9 @@ def reasoning_inputs(body):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rejection", [
+    (500, '{"error":{"message":"The encrypted content for item rs_remote could not be verified. '
+          'Reason: Encrypted content could not be decrypted or parsed. [code=90001]",'
+          '"type":"server_error","param":null,"code":null}}'),
     (400, '{"error":{"message":"Invalid signature in reasoning item rs_remote"}}'),
     (400, '{"error":{"message":"encrypted_content could not be verified"}}'),
     "sse-signature",
