@@ -581,6 +581,11 @@ class ResponsesModelClient:
     tool calls over the streaming `/responses` endpoint.
     """
 
+    # Class defaults keep clients created before a hot reload usable.
+    _strip_next_signatures = False
+    active_model: "typing.Union[str, None]" = None
+    fallback_reason = ""
+
     def __init__(
         self,
         config: "ResponsesProviderConfig",
@@ -768,14 +773,14 @@ class ResponsesModelClient:
                 retry_code = self.retry_error_code
                 try:
                     if request_client is not self:
-                        request_client._rejected_signatures = self._rejected_signatures
+                        request_client._rejected_signatures = self._signature_cache()
                     request_client._strip_next_signatures = strip_signatures
                     response = await asyncio.to_thread(
                         request_client._complete_sync, prompt, receive,
                     )
                     self._model_cooldowns.pop(request_client.model, None)
                     if strip_signatures and suspected_signatures:
-                        self._rejected_signatures.setdefault(
+                        self._signature_cache().setdefault(
                             request_client.model, set(),
                         ).update(suspected_signatures)
                     self.last_error = None
@@ -790,7 +795,7 @@ class ResponsesModelClient:
                     if exc.transient:
                         suspected_signatures = exc.signatures
                     else:
-                        self._rejected_signatures.setdefault(model, set()).update(exc.signatures)
+                        self._signature_cache().setdefault(model, set()).update(exc.signatures)
                     if model not in repaired_models:
                         repaired_models.add(model)
                         strip_signatures = True
@@ -910,7 +915,7 @@ class ResponsesModelClient:
         strip_signatures = self._strip_next_signatures
         payload = self._build_payload(prompt)
         input_items = payload["input"]
-        rejected = self._rejected_signatures.get(self.model)
+        rejected = self._signature_cache().get(self.model)
         if strip_signatures:
             _strip_signatures(input_items)
         elif rejected:
@@ -1751,6 +1756,9 @@ class ResponsesModelClient:
         return min(RETRY_DELAY_CAP_SECONDS, INITIAL_RETRY_DELAY_SECONDS * (
             RETRY_BACKOFF_FACTOR ** max(min(attempt - 1, 10), 0)
         ))
+
+    def _signature_cache(self) -> "typing.Dict[str, typing.Set[str]]":
+        return self.__dict__.setdefault("_rejected_signatures", {})
 
     def _is_modelproxy(self) -> "bool":
         host = (urllib.parse.urlparse(self._config.base_url).hostname or "").lower()
