@@ -75,6 +75,7 @@ class WebSessionView:
         self._title = ""
         self._last_final_id = ""
         self._model = "pycodex"
+        self._model_route = None
         self._cwd = ""
         self._rollout_path = ""
         self._recorded_rollout_path = ""
@@ -251,6 +252,7 @@ class WebSessionView:
                 "status_kind": "spinner" if self._spinner_status else "idle",
                 "spinner": self._spinner_status,
                 "model": self._model,
+                "model_route": self._model_route,
                 "cwd": self._cwd,
                 "rollout_path": self._rollout_path,
                 "recorded_rollout_path": self._recorded_rollout_path,
@@ -277,6 +279,7 @@ class WebSessionView:
         with self._lock:
             return {
                 "model": self._model,
+                "model_route": self._model_route,
                 "cwd": self._cwd,
                 "running": bool(self._spinner_status),
                 "working": bool(self._spinner_status)
@@ -294,6 +297,7 @@ class WebSessionView:
         if isinstance(event, SessionStateEvent):
             state = event.state
             self._model = state["model"]
+            self._model_route = state.get("model_route")
             self._cwd = state["cwd"]
             self._rollout_path = state["rollout_path"]
             self._recorded_rollout_path = state["recorded_rollout_path"]

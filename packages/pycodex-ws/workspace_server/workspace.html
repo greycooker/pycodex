@@ -898,6 +898,11 @@
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .context-meter.model-rerouted {
+      outline: 2px solid var(--clock);
+      outline-offset: 1px;
+    }
+
     .model-retry-group {
       white-space: normal;
     }
@@ -2747,7 +2752,11 @@
       ];
       const session = snapshot || sessionById(activeSessionId);
       const state = stateForSession(activeSessionId);
-      const label = session && session.model ? `Message to ${session.model}` : "Message";
+      const route = session && session.model_route;
+      const rerouted = route && route.active && route.active !== route.selected;
+      const label = rerouted
+        ? `Message to ${route.selected} (now ${route.active})`
+        : session && session.model ? `Message to ${session.model}` : "Message";
       const waitingForInput = snapshot ? snapshot.input_request : state.inputRequest;
       const showHint = Boolean(session?.running && !waitingForInput && hints.length);
       if (!showHint) state.hintStartedAt = null;
@@ -2796,6 +2805,13 @@
         : `${percent}% ${remainingLabel}. Context and agents`);
       document.getElementById("contextCurrent").textContent = formatTokens(session.usage_tokens);
       document.getElementById("contextCompact").textContent = compact == null ? "Off" : formatTokens(compact);
+      const route = session.model_route;
+      const rerouted = route && route.active && route.active !== route.selected;
+      contextMeter.classList.toggle("model-rerouted", Boolean(rerouted));
+      contextMeter.title = rerouted
+        ? `Selected ${route.selected}; answering with ${route.active}` +
+          (route.fallback_reason ? ` (${route.fallback_reason})` : "")
+        : "";
     }
 
     function setupContextDetails() {

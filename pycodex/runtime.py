@@ -240,7 +240,18 @@ class AgentRuntime:
                 self.agent.model_name,
                 self.agent.model_client.reasoning_effort or "default",
             ),
+            "model_route": self._model_route(),
             "history": conversation_history_to_turns(self.agent.history),
+        }
+
+    def _model_route(self):
+        client = self.agent.model_client
+        selected = self.agent.model_name
+        active = getattr(client, "active_model", None) or selected
+        return {
+            "selected": selected,
+            "active": active,
+            "fallback_reason": getattr(client, "fallback_reason", "") if active != selected else "",
         }
 
     def state_snapshot(self):
@@ -262,6 +273,7 @@ class AgentRuntime:
                 "name": agent.model_name,
                 "reasoning_effort": client.reasoning_effort,
             },
+            "model_route": self._model_route(),
             "running": execution.running,
             "active_turn": dict(active) if active is not None else None,
             "queued_inputs": [
@@ -929,6 +941,14 @@ class AgentRuntime:
                 self.publish_state("auto_title")
         if self.agent.recorded_session_file_path != self._recorded_rollout_path:
             self.publish_state("recording")
+        if isinstance(event, (StreamErrorEvent, TurnCompletedEvent, TurnFailedEvent)):
+            route = self._model_route()
+            previous = getattr(self, "_published_model_route", None)
+            if previous is None:
+                previous = {"selected": route["selected"], "active": route["selected"], "fallback_reason": ""}
+            if route != previous:
+                self._published_model_route = route
+                self.publish_state("model_route")
         self._publish(event)
 
     def _publish(self, event: "Event"):

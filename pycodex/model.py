@@ -52,6 +52,17 @@ RETRY_BACKOFF_FACTOR = 2.0
 RATE_LIMIT_RETRY_AFTER_RE = re.compile(
     r"(?i)(?:try again in|retry after)\s*(\d+(?:\.\d+)?)\s*(ms|seconds?|s)"
 )
+RETRY_DELAY_CAP_SECONDS = 60.0
+REPHRASE_RETRY_MARKER = "rephrasing your request"
+SIGNATURE_ERROR_RE = re.compile(
+    r"(?is)(?:signature|encrypted[_ ]content|thought[_ ]signature|reasoning item)"
+    r".{0,120}(?:invalid|rejected|mismatch|verif|could not be|cannot be|failed|expired|decrypt)"
+    r"|(?:invalid|rejected|mismatch|could not verify|failed to verify|unable to decrypt)"
+    r".{0,120}(?:signature|encrypted[_ ]content)"
+)
+SIGNATURE_SERVER_ERROR_CODES = frozenset({"server_error", "internal_server_error"})
+REASONING_ID_PREFIXES = ("rs_",)
+MODELPROXY_HOST_MARKERS = ("normandyfunc.com", "modelproxy", "models-proxy", "stepfun")
 
 
 @dataclass(frozen=True)
@@ -250,9 +261,11 @@ class ResponsesProviderConfig:
         return value
 
     def effective_stream_max_retries(self) -> "int":
+        """Retry budget per model; -1 (any negative value) means unlimited."""
         if self.stream_max_retries is None:
             return DEFAULT_STREAM_MAX_RETRIES
-        return max(int(self.stream_max_retries), 0)
+        value = int(self.stream_max_retries)
+        return -1 if value < 0 else value
 
     def effective_stream_idle_timeout_seconds(self) -> "float":
         if self.stream_idle_timeout_ms is None:
@@ -471,6 +484,83 @@ class ResponsesFirstDataTimeout(ResponsesRetryableError):
     """The configured wait for initial response data has expired."""
 
 
+class ResponsesSignatureRejected(ResponsesApiError):
+    """The server rejected replayed reasoning signatures or remote item IDs."""
+
+    def __init__(
+        self, message, signatures=(), transient=False, http_status=None, error_code=None,
+    ):
+        super().__init__(message, http_status, error_code)
+        self.signatures = tuple(signatures)
+        # A modelproxy server_error on a signed request: repair once, then it
+        # is an ordinary transient failure rather than a terminal one.
+        self.transient = transient
+
+    def as_retryable(self) -> "ResponsesRetryableError":
+        error = ResponsesRetryableError(
+            str(self), http_status=self.http_status, error_code=self.error_code,
+        )
+        error.elapsed_seconds = getattr(self, "elapsed_seconds", None)
+        error.first_data_seconds = getattr(self, "first_data_seconds", None)
+        return error
+
+
+def _is_signature_error_text(text: "str") -> "bool":
+    return bool(text) and SIGNATURE_ERROR_RE.search(text) is not None
+
+
+def _payload_signatures(input_items) -> "typing.Tuple[str, ...]":
+    found = []
+    for item in input_items:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            value = item.get("encrypted_content")
+            if isinstance(value, str) and value:
+                found.append(value)
+    return tuple(found)
+
+
+def _short_reason(exc) -> "str":
+    if exc.http_status is not None:
+        return "HTTP {0}".format(exc.http_status)
+    if exc.error_code:
+        return str(exc.error_code)
+    if isinstance(exc, ResponsesFirstDataTimeout):
+        return "first-data timeout"
+    return type(exc).__name__
+
+
+def _is_remote_output_item(item) -> "bool":
+    item_type = item.get("type")
+    if item_type == "message":
+        return item.get("role") == "assistant"
+    return item_type in ("function_call", "custom_tool_call", "web_search_call")
+
+
+def _strip_signatures(input_items, signatures=None) -> "int":
+    """Drop reasoning signatures and remote IDs in a request copy; count changes.
+
+    With ``signatures`` only reasoning items carrying one of them are cleaned
+    (a cached rejection). Without it every reasoning signature and every
+    server-issued ID on model output items is removed (the one-time repair).
+    Readable reasoning summaries/text, messages and tool records are kept.
+    """
+    changed = 0
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "reasoning":
+            value = item.get("encrypted_content")
+            if signatures is None or (value and value in signatures):
+                touched = bool(value) or "id" in item
+                item["encrypted_content"] = None
+                item.pop("id", None)
+                changed += touched
+        elif signatures is None and _is_remote_output_item(item) and "id" in item:
+            del item["id"]
+            changed += 1
+    return changed
+
+
 @dataclass
 class _StreamDiagnostics:
     raw_lines_received: "int" = 0
@@ -514,6 +604,10 @@ class ResponsesModelClient:
         self.last_error: "typing.Union[ResponsesApiError, None]" = None
         self._retry_wakeup: "typing.Union[asyncio.Event, None]" = None
         self._retry_stopped = False
+        self._rejected_signatures: "typing.Dict[str, typing.Set[str]]" = {}
+        self._strip_next_signatures = False
+        self.active_model: "str" = config.model
+        self.fallback_reason: "str" = ""
 
     def set_retry_error_code(self, code: "typing.Union[int, None]") -> "None":
         if code != self.retry_error_code:
@@ -534,6 +628,8 @@ class ResponsesModelClient:
     def model(self, model: "str") -> "None":
         self._config = replace(self._config, model=model)
         self._model_cooldowns.clear()
+        self.active_model = model
+        self.fallback_reason = ""
 
     @property
     def reasoning_effort(self) -> "typing.Union[str, None]":
@@ -622,6 +718,7 @@ class ResponsesModelClient:
     ) -> "ModelResponse":
         retries = 0
         max_retries = self._config.effective_stream_max_retries()
+        unlimited = max_retries < 0
         self.last_error = None
         self._retry_stopped = False
         self._retry_wakeup = asyncio.Event()
@@ -635,9 +732,12 @@ class ResponsesModelClient:
         available_models = [
             model for model in models if model not in self._model_cooldowns
         ]
+        cooled_reason = ""
         if not available_models:
             self._model_cooldowns.clear()
             available_models = list(models)
+        elif available_models[0] != self.model:
+            cooled_reason = "{0} is cooling down after a recent failure".format(self.model)
         fallback_models = iter(available_models)
         first_model = next(fallback_models)
         request_client = (
@@ -645,6 +745,9 @@ class ResponsesModelClient:
             if first_model == self.model
             else self.with_overrides(model=first_model)
         )
+        repaired_models: "typing.Set[str]" = set()
+        strip_signatures = False
+        suspected_signatures: "typing.Tuple[str, ...]" = ()
         loop = asyncio.get_running_loop()
         active = True
         callback_lock = threading.Lock()
@@ -664,96 +767,156 @@ class ResponsesModelClient:
                     raise ModelRequestInterrupted()
                 retry_code = self.retry_error_code
                 try:
-                    response = await asyncio.to_thread(request_client._complete_sync, prompt, receive)
+                    if request_client is not self:
+                        request_client._rejected_signatures = self._rejected_signatures
+                    request_client._strip_next_signatures = strip_signatures
+                    response = await asyncio.to_thread(
+                        request_client._complete_sync, prompt, receive,
+                    )
                     self._model_cooldowns.pop(request_client.model, None)
+                    if strip_signatures and suspected_signatures:
+                        self._rejected_signatures.setdefault(
+                            request_client.model, set(),
+                        ).update(suspected_signatures)
                     self.last_error = None
+                    self.active_model = request_client.model
+                    self.fallback_reason = (
+                        "" if request_client.model == self.model
+                        else self.fallback_reason or cooled_reason
+                    )
                     return response
-                except ResponsesApiError as exc:
-                    self.last_error = exc
-                    if self._retry_stopped:
-                        raise ModelRequestInterrupted() from exc
-                    if retry_code is not None and self.retry_error_code != retry_code:
-                        raise
-                    infinite = self.retry_error_code is not None
-                    if infinite:
-                        if not exc.matches_code(self.retry_error_code):
-                            raise
-                    elif not isinstance(exc, (ResponsesRetryableError, ResponsesModelUnavailableError)):
-                        raise
-                    elif (
-                        isinstance(exc, ResponsesModelUnavailableError)
-                        or (isinstance(exc, ResponsesFirstDataTimeout) and len(models) > 1)
-                        or retries >= max_retries
-                    ):
-                        cooldown = self._config.fallback_cooldown_seconds
-                        if len(models) > 1 and cooldown > 0:
-                            self._model_cooldowns[request_client.model] = (
-                                monotonic() + cooldown
-                            )
-                        fallback_model = next(fallback_models, None)
-                        if fallback_model is None:
-                            raise
-                        event_handler(
-                            StreamErrorEvent(
-                                f"Falling back: {request_client.model} -> {fallback_model}",
-                                0,
-                                max_retries,
-                                0.0,
-                                str(exc),
-                            )
-                        )
-                        request_client = self.with_overrides(model=fallback_model)
-                        retries = 0
+                except ResponsesSignatureRejected as exc:
+                    model = request_client.model
+                    if exc.transient:
+                        suspected_signatures = exc.signatures
+                    else:
+                        self._rejected_signatures.setdefault(model, set()).update(exc.signatures)
+                    if model not in repaired_models:
+                        repaired_models.add(model)
+                        strip_signatures = True
+                        event_handler(StreamErrorEvent(
+                            "Repairing rejected reasoning signatures on {0}".format(model),
+                            0, max_retries, 0.0, str(exc),
+                        ))
                         continue
-                    retries += 1
-                    delay_seconds = (
-                        exc.retry_delay_seconds
-                        if isinstance(exc, ResponsesRetryableError) else None
-                    )
-                    if delay_seconds is None:
-                        delay_seconds = self._retry_delay_seconds(retries)
-                    self._retry_wakeup.clear()
-                    event_handler(
-                        StreamErrorEvent(
-                            f"Reconnecting... {retries}/∞"
-                            if infinite else f"Reconnecting... {retries}/{max_retries}",
-                            retries,
-                            0 if infinite else max_retries,
-                            delay_seconds,
-                            str(exc),
-                        )
-                    )
-                    if delay_seconds > 0:
-                        waiter = asyncio.ensure_future(self._retry_wakeup.wait())
-                        try:
-                            await asyncio.wait({waiter}, timeout=delay_seconds)
-                        finally:
-                            if not waiter.done():
-                                waiter.cancel()
-                                try:
-                                    await waiter
-                                except asyncio.CancelledError:
-                                    pass
-                    if self._retry_stopped:
-                        raise ModelRequestInterrupted() from exc
-                    if infinite and self.retry_error_code is None:
+                    self.last_error = exc
+                    if not exc.transient:
                         raise
-                    if (
-                        self.retry_error_code is not None
-                        and not exc.matches_code(self.retry_error_code)
-                    ):
-                        raise
+                    failure = exc.as_retryable()
+                    failure.__cause__ = exc
+                    outcome = await self._handle_retryable(
+                        failure, models, max_retries, unlimited, retries,
+                        retry_code, request_client, fallback_models, event_handler,
+                    )
+                except ResponsesApiError as exc:
+                    outcome = await self._handle_retryable(
+                        exc, models, max_retries, unlimited, retries,
+                        retry_code, request_client, fallback_models, event_handler,
+                    )
+                retries, request_client = outcome
+                if request_client.model not in repaired_models:
+                    strip_signatures = False
         finally:
             self._retry_wakeup = None
             with callback_lock:
                 active = False
+
+    async def _handle_retryable(
+        self, exc, models, max_retries, unlimited, retries, retry_code,
+        request_client, fallback_models, event_handler,
+    ):
+        """Back off, fall back or re-raise; return the next (retries, client)."""
+        self.last_error = exc
+        if self._retry_stopped:
+            raise ModelRequestInterrupted() from exc
+        if retry_code is not None and self.retry_error_code != retry_code:
+            raise exc
+        infinite = self.retry_error_code is not None
+        if infinite:
+            if not exc.matches_code(self.retry_error_code):
+                raise exc
+        elif not isinstance(exc, (ResponsesRetryableError, ResponsesModelUnavailableError)):
+            raise exc
+        elif (
+            isinstance(exc, ResponsesModelUnavailableError)
+            or (isinstance(exc, ResponsesFirstDataTimeout) and len(models) > 1)
+            or (not unlimited and retries >= max_retries)
+        ):
+            cooldown = self._config.fallback_cooldown_seconds
+            if len(models) > 1 and cooldown > 0:
+                self._model_cooldowns[request_client.model] = monotonic() + cooldown
+            fallback_model = next(fallback_models, None)
+            if fallback_model is None:
+                raise exc
+            event_handler(
+                StreamErrorEvent(
+                    f"Falling back: {request_client.model} -> {fallback_model}",
+                    0,
+                    max_retries,
+                    0.0,
+                    str(exc),
+                )
+            )
+            self.fallback_reason = "{0} failed: {1}".format(
+                request_client.model, _short_reason(exc),
+            )
+            return 0, self.with_overrides(model=fallback_model)
+        unbounded = infinite or unlimited
+        retries += 1
+        delay_seconds = (
+            exc.retry_delay_seconds
+            if isinstance(exc, ResponsesRetryableError) else None
+        )
+        if delay_seconds is None:
+            delay_seconds = self._retry_delay_seconds(retries)
+        self._retry_wakeup.clear()
+        event_handler(
+            StreamErrorEvent(
+                f"Reconnecting... {retries}/∞"
+                if unbounded else f"Reconnecting... {retries}/{max_retries}",
+                retries,
+                0 if unbounded else max_retries,
+                delay_seconds,
+                str(exc),
+            )
+        )
+        if delay_seconds > 0:
+            waiter = asyncio.ensure_future(self._retry_wakeup.wait())
+            try:
+                await asyncio.wait({waiter}, timeout=delay_seconds)
+            finally:
+                if not waiter.done():
+                    waiter.cancel()
+                    try:
+                        await waiter
+                    except asyncio.CancelledError:
+                        pass
+        if self._retry_stopped:
+            raise ModelRequestInterrupted() from exc
+        if infinite and self.retry_error_code is None:
+            raise exc
+        if (
+            self.retry_error_code is not None
+            and not exc.matches_code(self.retry_error_code)
+        ):
+            raise exc
+        return retries, request_client
 
     def _complete_sync(
         self,
         prompt: "Prompt",
         event_handler: "ModelStreamEventHandler",
     ) -> "ModelResponse":
+        strip_signatures = self._strip_next_signatures
         payload = self._build_payload(prompt)
+        input_items = payload["input"]
+        rejected = self._rejected_signatures.get(self.model)
+        if strip_signatures:
+            _strip_signatures(input_items)
+        elif rejected:
+            _strip_signatures(input_items, rejected)
+        signatures = _payload_signatures(input_items)
+        signed_via_proxy = bool(signatures) and self._is_modelproxy()
         session_id = payload["prompt_cache_key"]
         body = json.dumps(payload).encode("utf-8")
         url = self.responses_url()
@@ -801,6 +964,15 @@ class ResponsesModelClient:
                         )
                         if _is_context_length_error_message(error_body):
                             raise ContextLengthExceeded(message, http_status=response.status_code)
+                        if signatures and _is_signature_error_text(error_body):
+                            raise ResponsesSignatureRejected(
+                                message, signatures, http_status=response.status_code,
+                            )
+                        if (
+                            response.status_code == 400
+                            and REPHRASE_RETRY_MARKER in error_body.lower()
+                        ):
+                            raise ResponsesRetryableError(message, http_status=400)
                         if response.status_code >= 500 or response.status_code in (408, 429):
                             raise ResponsesRetryableError(
                                 message,
@@ -832,6 +1004,8 @@ class ResponsesModelClient:
                         event_handler,
                         diagnostics=diagnostics,
                         session_id=session_id,
+                        signatures=signatures,
+                        signed_via_proxy=signed_via_proxy,
                     )
                     completed = True
                     return result
@@ -1098,6 +1272,8 @@ class ResponsesModelClient:
         event_handler: "ModelStreamEventHandler",
         diagnostics: "typing.Union[_StreamDiagnostics, None]" = None,
         session_id: "typing.Union[str, None]" = None,
+        signatures: "typing.Tuple[str, ...]" = (),
+        signed_via_proxy: "bool" = False,
     ) -> "ModelResponse":
         items: "typing.List[typing.Union[typing.Union[AssistantMessage, ToolCall], ReasoningItem]]" = ([])
         saw_completed = False
@@ -1204,7 +1380,20 @@ class ResponsesModelClient:
                 )
 
             if event_type == "response.failed":
-                self._raise_response_failed_error(payload, session_id)
+                self._raise_response_failed_error(
+                    payload, session_id, signatures, signed_via_proxy,
+                )
+
+            if event_type == "error":
+                error = payload.get("error")
+                if not isinstance(error, dict):
+                    error = {
+                        key: payload.get(key) for key in ("code", "type", "message")
+                        if payload.get(key) is not None
+                    }
+                self._raise_response_failed_error(
+                    {"response": {"error": error}}, session_id, signatures, signed_via_proxy,
+                )
 
         if not saw_completed:
             raise ResponsesRetryableError(
@@ -1449,6 +1638,7 @@ class ResponsesModelClient:
 
     def _raise_response_failed_error(
         self, payload: "typing.Dict[str, object]", session_id=None,
+        signatures=(), signed_via_proxy=False,
     ) -> "None":
         response = payload.get("response")
         error = response.get("error") if isinstance(response, dict) else None
@@ -1467,6 +1657,12 @@ class ResponsesModelClient:
             message
         ):
             raise ContextLengthExceeded(formatted, error_code=error_code)
+        if signatures and _is_signature_error_text(message + " " + code):
+            raise ResponsesSignatureRejected(formatted, signatures, error_code=error_code)
+        if signed_via_proxy and code in SIGNATURE_SERVER_ERROR_CODES:
+            raise ResponsesSignatureRejected(
+                formatted, signatures, transient=True, error_code=error_code,
+            )
         if code in {"model_not_found", "model_not_available", "permission_denied"}:
             raise ResponsesModelUnavailableError(formatted, error_code=error_code)
         if code in {
@@ -1552,9 +1748,14 @@ class ResponsesModelClient:
         return f"{text[:limit]}..."
 
     def _retry_delay_seconds(self, attempt: "int") -> "float":
-        return INITIAL_RETRY_DELAY_SECONDS * (
+        return min(RETRY_DELAY_CAP_SECONDS, INITIAL_RETRY_DELAY_SECONDS * (
             RETRY_BACKOFF_FACTOR ** max(min(attempt - 1, 10), 0)
-        )  # 200s max
+        ))
+
+    def _is_modelproxy(self) -> "bool":
+        host = (urllib.parse.urlparse(self._config.base_url).hostname or "").lower()
+        provider = (self._config.provider_name or "").lower()
+        return any(marker in host or marker in provider for marker in MODELPROXY_HOST_MARKERS)
 
     def _try_parse_retry_after_seconds(
         self,
