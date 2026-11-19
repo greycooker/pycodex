@@ -446,6 +446,36 @@ async def _delete_session_response(
     return JSONResponse({"ok": True, "sessions": manager.list_sessions()})
 
 
+DELETE_COMMAND = "/delete"
+
+
+def _is_delete_command(prompt: str) -> bool:
+    return prompt.strip() == DELETE_COMMAND
+
+
+async def _delete_current_session(
+    manager: "WorkspaceSessionManager", session_id: str,
+) -> "typing.Dict[str, object]":
+    """Handle /delete typed into a session: close it and remove its rollout."""
+    try:
+        result = await manager.delete_session(manager.resolve_session_id(session_id or None))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session not found")
+    except (ValueError, RuntimeError) as exc:
+        return {"ok": False, "error": str(exc)}
+    next_id = manager.resolve_session_id(None)
+    return {
+        "ok": True,
+        "type": "deleted",
+        "deleted_session_id": session_id,
+        "removed_files": result["removed_files"],
+        "kept_files": result["kept_files"],
+        "session_id": next_id,
+        "sessions": manager.list_sessions(),
+        "snapshot": session_snapshot(manager.get(next_id)),
+    }
+
+
 def _session_response(
     manager: "WorkspaceSessionManager",
     request: Request,
@@ -484,6 +514,8 @@ async def _message_response(
         raise HTTPException(status_code=404, detail="session not found")
     if "request_id" in payload:
         result = await link.answer_input(payload["request_id"], payload.get("answer"))
+    elif _is_delete_command(str(payload.get("prompt") or "")):
+        result = await _delete_current_session(manager, manager.resolve_session_id(session_id or None))
     else:
         result = await link.submit(
             str(payload.get("prompt") or ""),
@@ -553,6 +585,13 @@ async def _websocket_session_handler(
                         payload.get("request_id"),
                         payload.get("answer"),
                     )
+                elif _is_delete_command(str(payload.get("prompt") or "")):
+                    try:
+                        result = await _delete_current_session(
+                            manager, manager.resolve_session_id(target_session_id or None),
+                        )
+                    except HTTPException as error:
+                        result = {"ok": False, "error": error.detail}
                 else:
                     try:
                         name = _user_message_name(payload)

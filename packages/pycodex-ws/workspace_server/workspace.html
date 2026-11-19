@@ -2744,6 +2744,7 @@
         "点击文件链接，可在旁边预览。",
         "在设置中添加：后台命令状态。",
         "用 /compact 压缩上下文。",
+        "用 /delete 删除当前会话及其服务器上的对话记录。",
         "在设置中添加：会话私有便笺。",
         "在设置中添加：定时唤醒时间分隔线。",
         "按 ↑ / ↓ 找回之前的输入。",
@@ -3488,12 +3489,28 @@
 
     async function submitPrompt(text) {
       const sessionId = activeSessionId;
+      const deleting = text.trim() === "/delete";
+      if (deleting) {
+        const current = sessionById(sessionId);
+        const name = (current && current.title) || "this conversation";
+        if (!window.confirm(`Delete "${name}"? Its saved conversation record on the server will also be removed. This cannot be undone.`)) {
+          return;
+        }
+      }
       const response = await fetch(relativeUrl("api/session/message"), {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({prompt: text, sender: "web", session_id: sessionId}),
       });
       const payload = await response.json();
+      if (deleting && response.ok && payload.ok && payload.type === "deleted") {
+        sessionState.delete(sessionId);
+        updateSessions(payload.sessions || []);
+        const removed = (payload.removed_files || []).length;
+        showToast(removed ? "Conversation deleted, including its saved record." : "Conversation deleted.");
+        if (activeSessionId === sessionId) await switchSession(payload.session_id || (sessions[0] && sessions[0].id));
+        return;
+      }
       if (activeSessionId !== sessionId) return;
       if (!response.ok || !payload.ok) {
         addEntry("error", payload.error || `HTTP ${response.status}`);

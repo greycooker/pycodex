@@ -239,6 +239,62 @@ class WorkspaceSessionManager:
         await session.close()
         self.persist_workspace_state()
 
+    async def delete_session(self, session_id: str) -> "typing.Dict[str, object]":
+        """Close a session and remove its own rollout file from disk.
+
+        Other sessions are untouched: a rollout still referenced by another
+        open tab is kept, and only files under ``codex_home/sessions`` are
+        removed. Deleting the last tab first opens a fresh empty one.
+        """
+        session = self._sessions[session_id]
+        snapshot = session_snapshot(session)
+        candidates = {
+            str(path) for path in (
+                snapshot.get("recorded_rollout_path"),
+                snapshot.get("rollout_path"),
+                self._tab_states.get(session_id, {}).get("rollout_path"),
+            ) if path
+        }
+        if len(self._session_order) <= 1:
+            await self.create_session()
+        await self.close_session(session_id)
+        in_use = {
+            str(state.get("rollout_path") or "") for state in self._tab_states.values()
+        }
+        for other in self._sessions.values():
+            other_snapshot = session_snapshot(other)
+            in_use.update(
+                str(other_snapshot.get(key) or "")
+                for key in ("recorded_rollout_path", "rollout_path")
+            )
+        sessions_root = (self.codex_home / "sessions").resolve()
+        removed, kept = [], []
+        for candidate in sorted(candidates):
+            path = Path(candidate).expanduser()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if candidate in in_use or str(resolved) in in_use:
+                kept.append(candidate)
+                continue
+            if sessions_root not in resolved.parents or not resolved.is_file():
+                continue
+            try:
+                resolved.unlink()
+            except OSError:
+                kept.append(candidate)
+                continue
+            removed.append(str(resolved))
+            parent = resolved.parent
+            while parent != sessions_root and sessions_root in parent.parents:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        return {"removed_files": removed, "kept_files": kept}
+
     async def _watch_session_state(self, session_id: str, session, subscriber) -> None:
         try:
             while True:
